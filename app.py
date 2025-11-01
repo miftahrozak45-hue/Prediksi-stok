@@ -51,31 +51,31 @@ if not st.session_state["authenticated"]:
     st.stop()
 
 # =========================================================
-# 1. APP ASLI KAMU MULAI DI SINI
+# 1. APP UTAMA
 # =========================================================
-
 st.set_page_config(page_title="PRB Stock Predictor", layout="wide")
 st.title("Prediksi Kebutuhan Stok PRB (EFTS + PSO)")
 
 # info user di sidebar
 st.sidebar.write(f"👤 Login sebagai: **{st.session_state['username']}** ({st.session_state['role']})")
+role = st.session_state["role"]
 
 DATA_DIR = Path("./data")
 
 # =====================
 # Sidebar: Input & opsi
 # =====================
-st.sidebar.header("📥 Data Sumber")
+st.sidebar.header("📥 Data Sumber (untuk prediksi)")
 uploaded = st.sidebar.file_uploader("Upload Excel (.xlsx) atau CSV", type=["xlsx", "csv"])
 sep = st.sidebar.selectbox("Delimiter (jika CSV)", [";", ",", "\\t"], index=0)
 sheet_name = st.sidebar.text_input("Sheet name (Excel)", value=None, help="Kosongkan kalau bukan Excel atau sheet pertama.")
 
-st.sidebar.header("⚙️ Pengaturan")
+st.sidebar.header("⚙️ Pengaturan Prediksi")
 uod_method = st.sidebar.selectbox("Metode UoD", ["std", "iqr", "fixed"], index=0)
 fixed_d = st.sidebar.number_input("fixed_d (bila method=fixed)", value=100, step=10)
 
-# kalau viewer, jangan izinkan PSO (karena berat)
-if st.session_state["role"] == "viewer":
+# kalau viewer, jangan izinkan PSO (berat)
+if role == "viewer":
     st.sidebar.write("🔒 PSO dikunci untuk viewer")
     run_pso = False
 else:
@@ -90,13 +90,22 @@ lead_time_days = st.sidebar.number_input("Lead time (hari)", min_value=1, value=
 st.sidebar.header("🧪 Evaluasi (opsional)")
 uploaded_real = st.sidebar.file_uploader("Upload Realisasi (Excel/CSV)", type=["xlsx", "csv"], key="real")
 
+# 👉 sidebar khusus APRIORI (file transaksi terpisah)
+st.sidebar.header("🧩 Data Transaksi untuk Apriori")
+uploaded_apriori = st.sidebar.file_uploader(
+    "Upload transaksi (REFASALSEP, OBAT)",
+    type=["xlsx", "csv"],
+    key="apriori_file"
+)
+min_support_apr = st.sidebar.slider("Min support", 0.01, 0.5, 0.02, step=0.01)
+min_lift_apr = st.sidebar.slider("Min lift", 1.0, 5.0, 1.2, step=0.1)
+
 # =====================
 # Helper load data
 # =====================
 @st.cache_data
 def load_df(file, is_csv, sep, sheet_name):
     if is_csv:
-        # perbaiki supaya tidak error encoding
         sep = "\t" if sep == "\\t" else sep
         for enc in ["utf-8", "utf-8-sig", "latin1", "cp1252", "iso-8859-1"]:
             try:
@@ -117,7 +126,7 @@ def load_sample():
     return None
 
 # =====================
-# Load data
+# Load data utk prediksi
 # =====================
 if uploaded:
     is_csv = uploaded.name.lower().endswith(".csv")
@@ -129,7 +138,7 @@ else:
         st.stop()
 
 # Normalisasi kolom
-required_cols = {"PERIODE","OBAT","JML OBAT SETUJU"}
+required_cols = {"PERIODE", "OBAT", "JML OBAT SETUJU"}
 missing = required_cols - set(df_raw.columns)
 if missing:
     st.error(f"Kolom wajib tidak ditemukan: {missing}. Sesuaikan header file.")
@@ -137,8 +146,8 @@ if missing:
 
 df = df_raw.copy()
 df["PERIODE"] = pd.to_datetime(df["PERIODE"])
-df = df.sort_values(["OBAT","PERIODE"])
-st.subheader("🔎 Cuplikan Data")
+df = df.sort_values(["OBAT", "PERIODE"])
+st.subheader("🔎 Cuplikan Data Prediksi")
 st.dataframe(df.head())
 
 # =====================
@@ -153,8 +162,8 @@ def determine_uod(df, method='std', fixed_d=100):
             d1 = d2 = fixed_d
         elif method == 'iqr':
             q1, q3 = data.quantile(0.25), data.quantile(0.75)
-            iqr = q3-q1
-            d1 = d2 = 1.5*iqr
+            iqr = q3 - q1
+            d1 = d2 = 1.5 * iqr
         elif method == 'std':
             std = data.std()
             d1 = d2 = std
@@ -178,39 +187,39 @@ def create_fuzzy_intervals(u_min, u_max, inner_bounds):
 
 def triangular_membership(x, a, b, c):
     if a <= x <= b:
-        return (x-a)/(b-a) if b!=a else 0
+        return (x - a) / (b - a) if b != a else 0
     elif b < x <= c:
-        return (c-x)/(c-b) if c!=b else 0
+        return (c - x) / (c - b) if c != b else 0
     return 0
 
 def determine_fuzzy_set(value, intervals):
     memberships = []
-    for i,(lo,hi) in enumerate(intervals):
-        if i==0:
-            a, b, c = lo, hi, hi+(hi-lo)
-        elif i==len(intervals)-1:
-            a, b, c = lo-(hi-lo), lo, hi
+    for i, (lo, hi) in enumerate(intervals):
+        if i == 0:
+            a, b, c = lo, hi, hi + (hi - lo)
+        elif i == len(intervals) - 1:
+            a, b, c = lo - (hi - lo), lo, hi
         else:
-            a, b, c = lo, (lo+hi)/2, hi
-        memberships.append(triangular_membership(value,a,b,c))
-    return f"A{np.argmax(memberships)+1}"
+            a, b, c = lo, (lo + hi) / 2, hi
+        memberships.append(triangular_membership(value, a, b, c))
+    return f"A{np.argmax(memberships) + 1}"
 
 def build_flrg(fuzzy_series):
     flrg = {}
-    for i in range(len(fuzzy_series)-1):
-        cur_, nxt_ = fuzzy_series[i], fuzzy_series[i+1]
+    for i in range(len(fuzzy_series) - 1):
+        cur_, nxt_ = fuzzy_series[i], fuzzy_series[i + 1]
         flrg.setdefault(cur_, []).append(nxt_)
     return flrg
 
 def defuzzify(predicted_labels, intervals):
-    if not predicted_labels: 
+    if not predicted_labels:
         return None
     mids = []
     for lab in predicted_labels:
         try:
             idx = int(lab[1:]) - 1
-            lo,hi = intervals[idx]
-            mids.append((lo+hi)/2)
+            lo, hi = intervals[idx]
+            mids.append((lo + hi) / 2)
         except:
             continue
     return float(np.mean(mids)) if mids else None
@@ -226,37 +235,52 @@ def _fitness_boundaries(inner_bounds, data, u_min, u_max, k):
             continue
         y_true = fuzz[1:]
         y_pred = fuzz[:-1]
-        map_idx = lambda s:int(s[1:]) if isinstance(s,str) and s[0]=='A' else 0
-        y_t = np.array([map_idx(s) for s in y_true], float)
-        y_p = np.array([map_idx(s) for s in y_pred], float)
+        to_idx = lambda s: int(s[1:]) if isinstance(s, str) and s.startswith("A") else 0
+        y_t = np.array([to_idx(s) for s in y_true], float)
+        y_p = np.array([to_idx(s) for s in y_pred], float)
         costs.append(sqrt(mean_squared_error(y_t, y_p)))
     return np.array(costs)
 
 optimal_bounds = {}
 if run_pso:
     import pyswarms as ps
-    options = {'c1':0.5,'c2':0.3,'w':0.9}
+    options = {'c1': 0.5, 'c2': 0.3, 'w': 0.9}
     st.info("Menjalankan PSO… proses bisa lama tergantung data.")
     prog = st.progress(0)
     uniq_obat = df["OBAT"].unique()
     for idx, obat in enumerate(uniq_obat, start=1):
-        hist = df[df["OBAT"]==obat]["JML OBAT SETUJU"].values
-        info = df_uod[df_uod["OBAT"]==obat]
-        if len(hist)<2 or info.empty:
+        hist = df[df["OBAT"] == obat]["JML OBAT SETUJU"].values
+        info = df_uod[df_uod["OBAT"] == obat]
+        if len(hist) < 2 or info.empty:
             continue
         u_min, u_max = info["U_MIN"].iloc[0], info["U_MAX"].iloc[0]
         dim = num_intervals - 1
         lower = np.full(dim, u_min)
         upper = np.full(dim, u_max)
-        opt = ps.single.GlobalBestPSO(n_particles=n_particles, dimensions=dim, options=options, bounds=(lower,upper))
-        cost, pos = opt.optimize(_fitness_boundaries, iters=iters, data=hist, u_min=u_min, u_max=u_max, k=num_intervals, verbose=False)
+        opt = ps.single.GlobalBestPSO(
+            n_particles=n_particles,
+            dimensions=dim,
+            options=options,
+            bounds=(lower, upper),
+        )
+        cost, pos = opt.optimize(
+            _fitness_boundaries,
+            iters=iters,
+            data=hist,
+            u_min=u_min,
+            u_max=u_max,
+            k=num_intervals,
+            verbose=False,
+        )
         optimal_bounds[obat] = np.sort(pos)
-        prog.progress(idx/len(uniq_obat))
+        prog.progress(idx / len(uniq_obat))
     st.success("PSO selesai.")
 else:
     for _, r in df_uod.iterrows():
-        obat = r["OBAT"]; u_min=r["U_MIN"]; u_max=r["U_MAX"]
-        inner = np.linspace(u_min, u_max, num_intervals+1)[1:-1]
+        obat = r["OBAT"]
+        u_min = r["U_MIN"]
+        u_max = r["U_MAX"]
+        inner = np.linspace(u_min, u_max, num_intervals + 1)[1:-1]
         optimal_bounds[obat] = inner
 
 # =====================
@@ -264,8 +288,8 @@ else:
 # =====================
 pred_rows = []
 for obat, sub in df.groupby("OBAT"):
-    info = df_uod[df_uod["OBAT"]==obat]
-    if info.empty or obat not in optimal_bounds: 
+    info = df_uod[df_uod["OBAT"] == obat]
+    if info.empty or obat not in optimal_bounds:
         continue
     u_min, u_max = info["U_MIN"].iloc[0], info["U_MAX"].iloc[0]
     intervals = create_fuzzy_intervals(u_min, u_max, optimal_bounds[obat])
@@ -280,13 +304,15 @@ for obat, sub in df.groupby("OBAT"):
     pred_value = defuzzify(predicted_fs, intervals)
 
     next_period = sub["PERIODE"].iloc[-1] + pd.DateOffset(months=1)
-    pred_rows.append({
-        "OBAT": obat,
-        "PERIODE_PREDIKSI": next_period,
-        "FUZZY_SET_TERAKHIR": last_fs,
-        "FUZZY_PREDIKSI_BULAN_DEPAN": predicted_fs,
-        "PREDIKSI_BULAN_DEPAN": pred_value
-    })
+    pred_rows.append(
+        {
+            "OBAT": obat,
+            "PERIODE_PREDIKSI": next_period,
+            "FUZZY_SET_TERAKHIR": last_fs,
+            "FUZZY_PREDIKSI_BULAN_DEPAN": predicted_fs,
+            "PREDIKSI_BULAN_DEPAN": pred_value,
+        }
+    )
 
 df_pred = pd.DataFrame(pred_rows).sort_values("OBAT")
 st.subheader("📈 Prediksi Bulan Depan")
@@ -304,22 +330,25 @@ def load_real(file):
 
 if uploaded_real is not None:
     df_real = load_real(uploaded_real).copy()
-    if "OBAT" not in df_real.columns:
+    if "OBAT" not in df_real.columns or "REALISASI_AKTUAL" not in df_real.columns:
         st.error("File realisasi harus punya kolom 'OBAT' dan 'REALISASI_AKTUAL'.")
-    elif "REALISASI_AKTUAL" not in df_real.columns:
-        st.error("Kolom 'REALISASI_AKTUAL' tidak ditemukan.")
     else:
-        join = pd.merge(df_pred[["OBAT","PREDIKSI_BULAN_DEPAN"]], df_real[["OBAT","REALISASI_AKTUAL"]], on="OBAT", how="inner")
+        join = pd.merge(
+            df_pred[["OBAT", "PREDIKSI_BULAN_DEPAN"]],
+            df_real[["OBAT", "REALISASI_AKTUAL"]],
+            on="OBAT",
+            how="inner",
+        )
         if join.empty:
             st.warning("Tidak ada OBAT yang cocok antara prediksi dan realisasi.")
         else:
             y_true = join["REALISASI_AKTUAL"].astype(float)
             y_pred = join["PREDIKSI_BULAN_DEPAN"].astype(float)
-            valid = (y_true!=0) & (~np.isnan(y_true)) & (~np.isnan(y_pred))
+            valid = (y_true != 0) & (~np.isnan(y_true)) & (~np.isnan(y_pred))
             if valid.any():
-                mape = np.mean(np.abs((y_true[valid]-y_pred[valid])/y_true[valid]))*100
+                mape = np.mean(np.abs((y_true[valid] - y_pred[valid]) / y_true[valid])) * 100
                 rmse = sqrt(mean_squared_error(y_true[valid], y_pred[valid]))
-                mae  = mean_absolute_error(y_true[valid], y_pred[valid])
+                mae = mean_absolute_error(y_true[valid], y_pred[valid])
                 st.subheader("📊 Evaluasi")
                 st.write(f"**MAPE:** {mape:.2f}%  |  **RMSE:** {rmse:.2f}  |  **MAE:** {mae:.2f}")
                 st.dataframe(join)
@@ -332,8 +361,8 @@ if uploaded_real is not None:
 from scipy.stats import norm
 def calc_stock_levels(df_hist, lead_time_days, service_level):
     lt_months = lead_time_days / 30.44
-    stats = df_hist.groupby("OBAT")["JML OBAT SETUJU"].agg(["mean","std"]).reset_index()
-    stats.rename(columns={"mean":"AVG_MONTHLY","std":"STD_MONTHLY"}, inplace=True)
+    stats = df_hist.groupby("OBAT")["JML OBAT SETUJU"].agg(["mean", "std"]).reset_index()
+    stats.rename(columns={"mean": "AVG_MONTHLY", "std": "STD_MONTHLY"}, inplace=True)
     stats["STD_MONTHLY"] = stats["STD_MONTHLY"].fillna(0.0)
     z = norm.ppf(service_level)
     stats["SAFETY_STOCK"] = z * stats["STD_MONTHLY"] * np.sqrt(lt_months)
@@ -341,14 +370,14 @@ def calc_stock_levels(df_hist, lead_time_days, service_level):
     stats["REORDER_POINT"] = (avg_daily * lead_time_days) + stats["SAFETY_STOCK"]
     stats["SAFETY_STOCK"] = stats["SAFETY_STOCK"].clip(lower=0)
     stats["REORDER_POINT"] = stats["REORDER_POINT"].clip(lower=0)
-    return stats[["OBAT","SAFETY_STOCK","REORDER_POINT"]]
+    return stats[["OBAT", "SAFETY_STOCK", "REORDER_POINT"]]
 
 df_stock = calc_stock_levels(df, lead_time_days, service_level)
 st.subheader("🏬 Safety Stock & Reorder Point")
 st.dataframe(df_stock.head())
 
 # =====================
-# Download tombol
+# Download tombol (prediksi)
 # =====================
 def to_excel_bytes(df_dict):
     from io import BytesIO
@@ -360,23 +389,22 @@ def to_excel_bytes(df_dict):
     return buf
 
 st.download_button(
-    "⬇️ Download hasil (Excel)",
+    "⬇️ Download hasil prediksi (Excel)",
     data=to_excel_bytes({"prediksi": df_pred, "uod": df_uod, "stok": df_stock}),
     file_name="hasil_prediksi_prb.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
-# =====================
-# 7. APRIORI / BUNDLING OBAT (File terpisah)
-# =====================
-from mlxtend.frequent_patterns import apriori, association_rules
 
+# =========================================================
+# 7. APRIORI / BUNDLING OBAT (FILE TERPISAH)
+# =========================================================
 if uploaded_apriori is not None:
     st.subheader("🧩 Analisis Bundling Obat (Apriori)")
 
-    # Deteksi format file
-    is_csv = uploaded_apriori.name.lower().endswith(".csv")
+    # baca file apriori
+    is_csv_apr = uploaded_apriori.name.lower().endswith(".csv")
     try:
-        if is_csv:
+        if is_csv_apr:
             df_apr = pd.read_csv(uploaded_apriori, sep=";", encoding="utf-8")
         else:
             df_apr = pd.read_excel(uploaded_apriori)
@@ -387,15 +415,16 @@ if uploaded_apriori is not None:
     st.write("📄 Cuplikan data transaksi:")
     st.dataframe(df_apr.head())
 
-    # Cek kolom yang dibutuhkan
     if {"REFASALSEP", "OBAT"}.issubset(df_apr.columns):
         df_tx = df_apr[["REFASALSEP", "OBAT"]].dropna()
 
-        # One-hot encode
+        # one hot
         basket = pd.crosstab(df_tx["REFASALSEP"], df_tx["OBAT"])
         basket = basket.applymap(lambda x: 1 if x > 0 else 0)
 
-        # Jalankan Apriori
+        # import di sini supaya gak error kalau mlxtend belum ada
+        from mlxtend.frequent_patterns import apriori, association_rules
+
         freq_itemsets = apriori(basket, min_support=min_support_apr, use_colnames=True)
 
         if not freq_itemsets.empty:
@@ -418,7 +447,7 @@ if uploaded_apriori is not None:
             st.success("✅ Analisis bundling selesai!")
             st.dataframe(df_bundling)
 
-            # Tombol download
+            # tombol download bundling
             from io import BytesIO
             buf = BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as xw:
@@ -431,8 +460,8 @@ if uploaded_apriori is not None:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.warning("Tidak ada frequent itemset pada threshold tersebut.")
+            st.warning("Tidak ada frequent itemset pada threshold tersebut. Coba turunkan min_support.")
     else:
-        st.error("File Apriori harus punya kolom: REFASALSEP dan OBAT")
+        st.error("File Apriori harus punya kolom **REFASALSEP** dan **OBAT**.")
 else:
-    st.info("📎 Upload file transaksi untuk menjalankan analisis Apriori.")
+    st.info("📎 Upload file transaksi (REFASALSEP, OBAT) di sidebar untuk jalankan Apriori.")
