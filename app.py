@@ -465,3 +465,4 @@ if uploaded_apriori is not None:
         st.error("File Apriori harus punya kolom **REFASALSEP** dan **OBAT**.")
 else:
     st.info("📎 Upload file transaksi (REFASALSEP, OBAT) di sidebar untuk jalankan Apriori.")
+    
